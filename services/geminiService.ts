@@ -49,23 +49,17 @@ export const expandToEightFrames = async (input: MultimodalInput): Promise<Scene
     model: 'gemini-3-pro-preview',
     contents: `You are an award-winning film director. Expand the following input beat into a cinematic 8-frame storyboard sequence. 
     
-    The input may contain multilingual text (e.g., Hindi dialogue). Carefully translate and interpret the emotional subtext.
-    
     SOURCE INPUT:
     Visual/Shot Description: ${input.image}
-    Audio/Dialogue/Narration: ${input.audio}
+    Narration/Script (Original Language): ${input.audio}
 
-    Each frame must represent a progressive visual beat:
-    1. Framing: Opening shot/Context.
-    2. Focus: Character reaction/Detail.
-    3. Movement: Middle of the action.
-    4. Emotion: The "turning point" of the beat.
-    5. Detail: Close-up on a significant object or expression.
-    6. Response: Secondary character or environment shift.
-    7. Climax: The peak of this specific scene beat.
-    8. Transition: Preparation for the next scene.
+    INSTRUCTIONS:
+    1. Narrative Flow: Divide the provided narration across exactly 8 frames. 
+    2. LANGUAGE CONSISTENCY: The 'audioScript' MUST be in the same language as the input narration (e.g., Hindi). DO NOT translate it to English in the 'audioScript' field.
+    3. NO EMPTY SCRIPTS: Every single frame MUST have some text in 'audioScript'. If the narration is short, repeat key phrases or add descriptive emotional sounds (e.g. "[Sobbing]", "[Silence, heavy breathing]") to ensure the field is never empty.
+    4. Visual progression: Ensure each frame's 'visualPrompt' describes a distinct cinematic angle (Wide, Close-up, POV, etc.) while keeping characters consistent.
 
-    Output must be a JSON array of 8 objects with character consistency.`,
+    Output as a JSON array of 8 objects.`,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -78,9 +72,10 @@ export const expandToEightFrames = async (input: MultimodalInput): Promise<Scene
             timeOfDay: { type: Type.STRING },
             description: { type: Type.STRING },
             visualPrompt: { type: Type.STRING },
+            audioScript: { type: Type.STRING, description: "Narration text for this frame. MUST NOT BE EMPTY." },
             mood: { type: Type.STRING },
           },
-          required: ["sceneNumber", "location", "timeOfDay", "description", "visualPrompt", "mood"],
+          required: ["sceneNumber", "location", "timeOfDay", "description", "visualPrompt", "audioScript", "mood"],
         },
       },
     },
@@ -93,55 +88,81 @@ export const expandToEightFrames = async (input: MultimodalInput): Promise<Scene
     return beats.slice(0, 8);
   } catch (error) {
     console.error("Failed to expand frames:", error);
-    throw new Error("Director failed to expand the sequence into 8 frames.");
+    throw new Error("Director failed to expand sequence.");
   }
 };
 
 export const generateSceneAudio = async (text: string, mood: string): Promise<string> => {
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash-preview-tts",
-    contents: [{ parts: [{ text: `Read the following with a ${mood} tone: ${text}` }] }],
-    config: {
-      responseModalities: [Modality.AUDIO],
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: 'Kore' },
+  if (!text || text.trim().length === 0) {
+    console.warn("Empty text provided for audio generation. Skipping.");
+    return "";
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text: `Read with ${mood} emotion: ${text}` }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: 'Kore' },
+          },
         },
       },
-    },
-  });
+    });
 
-  const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-  if (!base64Audio) throw new Error("No audio data generated");
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Audio) {
+      console.warn("TTS API returned success but no audio data part.");
+      return "";
+    }
 
-  const pcmBytes = decodeBase64(base64Audio);
-  const wavBlob = pcmToWav(pcmBytes);
-  return URL.createObjectURL(wavBlob);
+    const pcmBytes = decodeBase64(base64Audio);
+    const wavBlob = pcmToWav(pcmBytes);
+    return URL.createObjectURL(wavBlob);
+  } catch (err) {
+    console.error("Audio generation error:", err);
+    return ""; // Return empty string so the UI can still show the frame without audio
+  }
 };
 
 export const generateSceneImage = async (visualPrompt: string, mood: string, referenceImageBase64?: string): Promise<string> => {
   const parts: any[] = [];
-  if (referenceImageBase64) {
-    parts.push({ inlineData: { data: referenceImageBase64, mimeType: "image/png" } });
+  
+  // Sanitize reference image
+  if (referenceImageBase64 && referenceImageBase64.length > 10) {
+    parts.push({ 
+      inlineData: { 
+        data: referenceImageBase64.replace(/\s/g, ''), 
+        mimeType: "image/png" 
+      } 
+    });
   }
 
-  const enhancedPrompt = `High-end cinematic storyboard, professional movie concept art. Style: Digital painting, cinematic lighting, 8k resolution, photorealistic but artistic. Mood: ${mood}. Scene: ${visualPrompt}`;
+  const enhancedPrompt = `High-end cinematic storyboard frame. Style: Professional movie concept art, digital painting, dramatic lighting, detailed textures, 8k resolution. Character consistency maintained. Mood: ${mood}. Scene: ${visualPrompt}`;
   parts.push({ text: enhancedPrompt });
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: { parts },
-    config: { 
-      imageConfig: { 
-        aspectRatio: "16:9" 
-      } 
-    },
-  });
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: { parts },
+      config: { 
+        imageConfig: { aspectRatio: "16:9" } 
+      },
+    });
 
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
+    const candidates = response.candidates;
+    if (!candidates || candidates.length === 0) throw new Error("Safety filters blocked image generation.");
+
+    for (const part of candidates[0].content.parts) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
     }
+    throw new Error("No image data in response.");
+  } catch (err) {
+    console.error("Image generation error:", err);
+    throw err; // Re-throw to show error state in the specific card
   }
-  throw new Error("Image generation failed");
 };

@@ -8,8 +8,6 @@ interface StoryboardCardProps {
 }
 
 const StoryboardCard: React.FC<StoryboardCardProps> = ({ item, onRetry }) => {
-  const hasMultimodal = !!(item.sourceImage || item.sourceAudio);
-
   const handleDownloadImage = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!item.imageUrl) return;
@@ -64,12 +62,17 @@ const StoryboardCard: React.FC<StoryboardCardProps> = ({ item, onRetry }) => {
           <div className="flex items-center justify-between mb-2">
             <span className="text-[9px] font-black text-slate-500 uppercase flex items-center gap-2">
               <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-              AI Directed Audio
+              AI Audio Script
             </span>
             {item.isAudioGenerating && (
               <span className="text-[8px] text-orange-500 font-bold uppercase animate-pulse">Synthesizing...</span>
             )}
           </div>
+          
+          <p className="text-[11px] text-white/90 font-medium mb-3 leading-tight border-l-2 border-orange-500/50 pl-3 py-1 bg-white/5 rounded-r">
+            {item.audioScript || '...'}
+          </p>
+
           {item.audioUrl && !item.isAudioGenerating && (
             <audio controls className="w-full h-8 brightness-90 contrast-125">
               <source src={item.audioUrl} type="audio/wav" />

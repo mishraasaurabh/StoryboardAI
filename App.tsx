@@ -19,15 +19,12 @@ const App: React.FC = () => {
       let rawData: MultimodalInput[] = [];
       const trimmedText = text.trim();
 
-      // Auto-detect JSON even if the toggle wasn't set
       if (trimmedText.startsWith('[') || trimmedText.startsWith('{')) {
         try {
           const parsed = JSON.parse(trimmedText);
           rawData = Array.isArray(parsed) ? parsed : [parsed];
         } catch (e) {
-          if (isMultimodal) throw new Error("Invalid JSON format. Please check your brackets and quotes.");
-          // If not explicitly multimodal, we might treat as text script later (not implemented for 8-frame yet)
-          throw new Error("Input looks like JSON but is malformed.");
+          throw new Error("Invalid JSON format. Please check your brackets and quotes.");
         }
       } else {
         throw new Error("Please provide your script in the Multimodal JSON format: [{ \"audio\": \"...\", \"image\": \"...\" }]");
@@ -38,7 +35,7 @@ const App: React.FC = () => {
       let allExpandedBeats: StoryboardItem[] = [];
       let globalLastImage: string | undefined = undefined;
 
-      // 1. Expand each input object into 8 distinct beats
+      // 1. Expansion phase
       for (let i = 0; i < rawData.length; i++) {
         const expandedBeats = await expandToEightFrames(rawData[i]);
         const skeletonBeats: StoryboardItem[] = expandedBeats.map(beat => ({
@@ -53,30 +50,42 @@ const App: React.FC = () => {
       
       setItems(allExpandedBeats);
 
-      // 2. Generate assets for each beat
+      // 2. Sequential asset generation
       for (let i = 0; i < allExpandedBeats.length; i++) {
         try {
           const currentBeat = allExpandedBeats[i];
           
-          // Generate Audio and Image concurrently
-          // We use the generated description for the audio to create a cohesive scene
+          // Generate Audio and Image
+          // Audio generation is more lenient (returns empty string on non-critical error)
+          // Image generation throws if blocked or failed
           const [imageUrl, audioUrl] = await Promise.all([
             generateSceneImage(currentBeat.visualPrompt, currentBeat.mood, globalLastImage),
-            generateSceneAudio(currentBeat.description, currentBeat.mood)
+            generateSceneAudio(currentBeat.audioScript, currentBeat.mood)
           ]);
 
           setItems(prev => prev.map((item, idx) => 
-            idx === i ? { ...item, imageUrl, audioUrl, isGenerating: false, isAudioGenerating: false } : item
+            idx === i ? { 
+              ...item, 
+              imageUrl, 
+              audioUrl: audioUrl || undefined, 
+              isGenerating: false, 
+              isAudioGenerating: false,
+              error: audioUrl === "" ? "Audio failed" : undefined 
+            } : item
           ));
 
-          // Update reference for visual consistency in the next frame
           if (imageUrl.includes('base64,')) {
             globalLastImage = imageUrl.split('base64,')[1];
           }
-        } catch (err) {
+        } catch (err: any) {
           console.error(`Failed frame ${i + 1}`, err);
           setItems(prev => prev.map((item, idx) => 
-            idx === i ? { ...item, isGenerating: false, isAudioGenerating: false, error: "Asset generation failed" } : item
+            idx === i ? { 
+              ...item, 
+              isGenerating: false, 
+              isAudioGenerating: false, 
+              error: err.message || "Visual generation failed" 
+            } : item
           ));
         }
       }

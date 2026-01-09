@@ -5,6 +5,7 @@ export interface SceneBeat {
   timeOfDay: string;
   description: string;
   visualPrompt: string;
+  audioScript: string; // Specific text for TTS
   mood: string;
 }
 
