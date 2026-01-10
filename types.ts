@@ -1,13 +1,23 @@
 
-export interface Character {
+export interface VoiceMetadata {
   gender: string;
   age: string;
-  voice: string;
+  accent: string;
+  language: string;
+  pitch: string;
+  tone: string;
 }
 
-export interface DialogueLine {
+export interface DialogueEntry {
   speaker: string;
+  voice: VoiceMetadata;
   text: string;
+}
+
+export interface AudioConfig {
+  type: string;
+  dialogue?: DialogueEntry;
+  dialogues?: DialogueEntry[];
 }
 
 export interface ProjectStyle {
@@ -23,17 +33,17 @@ export interface Scene {
   scene_id: number;
   duration_sec: number;
   frames: number;
-  audio_speaker?: string;
-  audio_text?: string;
-  audio_dialogue?: DialogueLine[];
   visual_prompt: string;
+  audio: AudioConfig;
 }
 
 export interface StoryboardProject {
   project_title: string;
   language: string;
+  frame_logic: string;
   style: ProjectStyle;
-  characters: Record<string, Character>;
+  negative_prompt: string[];
+  character_identity: Record<string, string>;
   scenes: Scene[];
 }
 
@@ -45,7 +55,7 @@ export interface SceneBeat {
   visualPrompt: string;
   audioScript: string; 
   mood: string;
-  dialogue?: DialogueLine[];
+  audioConfig?: AudioConfig;
 }
 
 export interface StoryboardItem extends SceneBeat {
@@ -54,7 +64,7 @@ export interface StoryboardItem extends SceneBeat {
   isGenerating: boolean;
   isAudioGenerating?: boolean;
   error?: string;
-  scene_id: number; // reference to parent scene
+  scene_id: number;
 }
 
 export enum AppState {

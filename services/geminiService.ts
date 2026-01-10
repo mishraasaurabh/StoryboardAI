@@ -1,13 +1,44 @@
 
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { SceneBeat, StoryboardProject, Scene, DialogueLine } from "../types";
+import { SceneBeat, StoryboardProject, Scene, AudioConfig, DialogueEntry } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
 
+/**
+ * Helper to retry a function if it fails due to rate limiting (429).
+ */
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, initialDelay = 5000): Promise<T> {
+  let lastError: any;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      const errorStr = JSON.stringify(err).toUpperCase();
+      const isRateLimit = 
+        errorStr.includes('429') || 
+        errorStr.includes('RESOURCE_EXHAUSTED') || 
+        errorStr.includes('QUOTA') ||
+        (err?.message && err.message.includes('429')) || 
+        (err?.status === 'RESOURCE_EXHAUSTED');
+
+      if (isRateLimit && i < maxRetries) {
+        const delay = initialDelay * Math.pow(2, i); // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+        console.warn(`Rate limited (429/RESOURCE_EXHAUSTED). Retrying in ${delay}ms... (Attempt ${i + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 function decodeBase64(base64: string): Uint8Array {
   const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes;
@@ -38,54 +69,61 @@ function pcmToWav(pcmData: Uint8Array, sampleRate: number = 24000): Blob {
 }
 
 export const expandSceneToFrames = async (project: StoryboardProject, scene: Scene): Promise<SceneBeat[]> => {
-  const targetFrames = Math.min(scene.frames || 4, 8); // Cap at 8 for performance
-  
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
-    contents: `You are a film director. Expand Scene ${scene.scene_id} into ${targetFrames} storyboard frames.
+  return withRetry(async () => {
+    const targetFrames = Math.min(scene.frames || 4, 12); 
     
-    PROJECT INFO:
-    Title: ${project.project_title}
-    Language: ${project.language}
-    Visual Style: ${project.style.visual_style}
-    Lighting: ${project.style.lighting}
-    Color Grading: ${project.style.color_grading}
-    
-    SCENE DATA:
-    Visual Prompt: ${scene.visual_prompt}
-    Audio/Dialogue: ${JSON.stringify(scene.audio_dialogue || scene.audio_text)}
-    
-    INSTRUCTIONS:
-    1. Narrative: Divide the scene into ${targetFrames} progressive visual beats.
-    2. Dialogue: If there is dialogue, assign specific lines or reactions to each frame in 'audioScript'. Keep the original language.
-    3. Consistency: Ensure character descriptions match project info.
-    4. Frames: Output exactly ${targetFrames} objects in a JSON array.`,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            sceneNumber: { type: Type.INTEGER },
-            location: { type: Type.STRING },
-            timeOfDay: { type: Type.STRING },
-            description: { type: Type.STRING },
-            visualPrompt: { type: Type.STRING },
-            audioScript: { type: Type.STRING },
-            mood: { type: Type.STRING },
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-pro-preview',
+      contents: `You are a film director. Expand Scene ${scene.scene_id} into ${targetFrames} storyboard frames.
+      
+      PROJECT CONTEXT:
+      Title: ${project.project_title}
+      Language: ${project.language}
+      Visual Style: ${project.style.visual_style}
+      Lighting: ${project.style.lighting}
+      Color Grading: ${project.style.color_grading}
+      
+      CHARACTER IDENTITIES (Use these for descriptions):
+      ${JSON.stringify(project.character_identity)}
+      
+      SCENE DATA:
+      Base Visual Prompt: ${scene.visual_prompt}
+      Audio/Dialogue: ${JSON.stringify(scene.audio)}
+      
+      INSTRUCTIONS:
+      1. Divide the scene into ${targetFrames} progressive visual beats.
+      2. Split the dialogue/narration across the beats in 'audioScript' (original language).
+      3. Ensure 'visualPrompt' includes character physical traits from Character Identities.
+      4. Output a JSON array of ${targetFrames} objects.`,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              sceneNumber: { type: Type.INTEGER },
+              location: { type: Type.STRING },
+              timeOfDay: { type: Type.STRING },
+              description: { type: Type.STRING },
+              visualPrompt: { type: Type.STRING },
+              audioScript: { type: Type.STRING },
+              mood: { type: Type.STRING },
+            },
+            required: ["sceneNumber", "location", "timeOfDay", "description", "visualPrompt", "audioScript", "mood"],
           },
-          required: ["sceneNumber", "location", "timeOfDay", "description", "visualPrompt", "audioScript", "mood"],
         },
       },
-    },
-  });
+    });
 
-  try {
-    return JSON.parse(response.text || '[]').slice(0, targetFrames);
-  } catch (error) {
-    throw new Error(`Failed to expand Scene ${scene.scene_id}`);
-  }
+    try {
+      const text = response.text;
+      if (!text) throw new Error("Empty response during expansion");
+      return JSON.parse(text.trim()).slice(0, targetFrames);
+    } catch (error) {
+      throw new Error(`Failed to parse scene expansion for Scene ${scene.scene_id}`);
+    }
+  });
 };
 
 const VOICE_MAP: Record<string, string> = {
@@ -95,15 +133,15 @@ const VOICE_MAP: Record<string, string> = {
   narrator: 'Fenrir'
 };
 
-export const generateSceneAudioMulti = async (text: string, mood: string, dialogue?: DialogueLine[]): Promise<string> => {
-  if (!text && (!dialogue || dialogue.length === 0)) return "";
+export const generateSceneAudioFromConfig = async (text: string, mood: string, config?: AudioConfig): Promise<string> => {
+  if (!text) return "";
 
-  try {
-    // If we have multi-speaker dialogue and exactly 2 speakers (per API rules), use multi-speaker mode
-    const uniqueSpeakers = Array.from(new Set(dialogue?.map(d => d.speaker.toLowerCase()) || []));
-    
-    if (dialogue && dialogue.length > 0 && uniqueSpeakers.length === 2) {
-      const prompt = `TTS the following conversation:\n` + dialogue.map(d => `${d.speaker}: ${d.text}`).join('\n');
+  return withRetry(async () => {
+    const dialogues = config?.dialogues || (config?.dialogue ? [config.dialogue] : []);
+    const uniqueSpeakers = Array.from(new Set(dialogues.map(d => d.speaker.toLowerCase())));
+
+    if (uniqueSpeakers.length === 2 && dialogues.length >= 2) {
+      const prompt = `TTS this conversation naturally:\n` + dialogues.map(d => `${d.speaker}: ${d.text}`).join('\n');
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
         contents: [{ parts: [{ text: prompt }] }],
@@ -123,7 +161,11 @@ export const generateSceneAudioMulti = async (text: string, mood: string, dialog
       return data ? URL.createObjectURL(pcmToWav(decodeBase64(data))) : "";
     }
 
-    // Default to single speaker narration
+    let selectedVoice = 'Kore';
+    if (dialogues.length > 0) {
+      selectedVoice = VOICE_MAP[dialogues[0].speaker.toLowerCase()] || 'Kore';
+    }
+
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
       contents: [{ parts: [{ text: `Read with ${mood} tone: ${text}` }] }],
@@ -131,34 +173,48 @@ export const generateSceneAudioMulti = async (text: string, mood: string, dialog
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Kore' },
+            prebuiltVoiceConfig: { voiceName: selectedVoice },
           },
         },
       },
     });
     const base64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     return base64 ? URL.createObjectURL(pcmToWav(decodeBase64(base64))) : "";
-  } catch (err) {
-    return "";
-  }
+  });
 };
 
-export const generateSceneImageWithStyle = async (visualPrompt: string, mood: string, project: StoryboardProject, refImage?: string): Promise<string> => {
-  const parts: any[] = [];
-  if (refImage) parts.push({ inlineData: { data: refImage.replace(/\s/g, ''), mimeType: "image/png" } });
+export const generateSceneImageWithProjectStyle = async (visualPrompt: string, mood: string, project: StoryboardProject, refImage?: string): Promise<string> => {
+  return withRetry(async () => {
+    const parts: any[] = [];
+    if (refImage) {
+      parts.push({ inlineData: { data: refImage.replace(/\s/g, ''), mimeType: "image/png" } });
+    }
 
-  const styleStr = `Style: ${project.style.visual_style}. Lighting: ${project.style.lighting}. Color: ${project.style.color_grading}. Aspect: ${project.style.aspect_ratio}.`;
-  const enhancedPrompt = `${styleStr} Cinematic storyboard. Mood: ${mood}. Character descriptions: ${JSON.stringify(project.characters)}. Scene: ${visualPrompt}`;
-  parts.push({ text: enhancedPrompt });
+    const negativePrompt = project.negative_prompt.join(", ");
+    const styleStr = `Genre: ${project.style.genre}. Visual: ${project.style.visual_style}. Lighting: ${project.style.lighting}. Color: ${project.style.color_grading}.`;
+    
+    const enhancedPrompt = `
+      ${styleStr} 
+      Cinematic professional storyboard concept art. 
+      Mood: ${mood}. 
+      Character Detail: ${JSON.stringify(project.character_identity)}.
+      Scene: ${visualPrompt}. 
+      Negative constraints (DO NOT SHOW): ${negativePrompt}.
+    `;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: { parts },
-    config: { imageConfig: { aspectRatio: project.style.aspect_ratio as any || "16:9" } },
+    parts.push({ text: enhancedPrompt });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: { parts },
+      config: { 
+        imageConfig: { aspectRatio: project.style.aspect_ratio as any || "16:9" } 
+      },
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) return `data:image/png;base64,${part.inlineData.data}`;
+    }
+    throw new Error("No image data returned from generator.");
   });
-
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-    if (part.inlineData) return `data:image/png;base64,${part.inlineData.data}`;
-  }
-  throw new Error("Safety filters or API error.");
 };
