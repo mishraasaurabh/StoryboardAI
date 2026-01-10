@@ -5,7 +5,7 @@ import { SceneBeat, StoryboardProject, Scene, AudioConfig, DialogueEntry } from 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
 
 /**
- * Helper to retry a function if it fails due to rate limiting (429).
+ * Helper to retry a function if it fails due to rate limiting (429) or transient server errors (500).
  */
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, initialDelay = 5000): Promise<T> {
   let lastError: any;
@@ -15,16 +15,20 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, initialDelay =
     } catch (err: any) {
       lastError = err;
       const errorStr = JSON.stringify(err).toUpperCase();
-      const isRateLimit = 
+      
+      // Check for both Rate Limits (429) and Internal Server Errors (500)
+      const isRetryable = 
         errorStr.includes('429') || 
         errorStr.includes('RESOURCE_EXHAUSTED') || 
         errorStr.includes('QUOTA') ||
-        (err?.message && err.message.includes('429')) || 
-        (err?.status === 'RESOURCE_EXHAUSTED');
+        errorStr.includes('500') ||
+        errorStr.includes('INTERNAL') ||
+        (err?.message && (err.message.includes('429') || err.message.includes('500'))) || 
+        (err?.status === 'RESOURCE_EXHAUSTED' || err?.status === 'INTERNAL');
 
-      if (isRateLimit && i < maxRetries) {
+      if (isRetryable && i < maxRetries) {
         const delay = initialDelay * Math.pow(2, i); // Exponential backoff: 5s, 10s, 20s, 40s, 80s
-        console.warn(`Rate limited (429/RESOURCE_EXHAUSTED). Retrying in ${delay}ms... (Attempt ${i + 1}/${maxRetries})`);
+        console.warn(`Transient error encountered (${err?.status || 'Error'}). Retrying in ${delay}ms... (Attempt ${i + 1}/${maxRetries})`);
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
